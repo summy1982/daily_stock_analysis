@@ -193,8 +193,22 @@ def get_configured_llm_models(model_list: List[Dict[str, Any]]) -> List[str]:
     return models
 
 
+# 模型特定的温度覆盖（某些模型有硬性限制）
+MODEL_TEMPERATURE_OVERRIDES: Dict[str, float] = {
+    "kimi-k2.5": 1.0,  # Moonshot Kimi K2.5 只允许 temperature=1
+    "openrouter/nvidia/nemotron-3-nano-30b-a3b": 1.0,  # 免费模型可能有限制
+}
+
+
 def resolve_unified_llm_temperature(model: str) -> float:
     """Resolve the unified LLM temperature with backward-compatible fallbacks."""
+    # 1. 检查模型特定覆盖
+    model_lower = model.lower()
+    for pattern, temp in MODEL_TEMPERATURE_OVERRIDES.items():
+        if pattern in model_lower:
+            return temp
+
+    # 2. 检查全局 LLM_TEMPERATURE
     llm_temperature_raw = os.getenv("LLM_TEMPERATURE")
     if llm_temperature_raw and llm_temperature_raw.strip():
         try:
@@ -202,6 +216,7 @@ def resolve_unified_llm_temperature(model: str) -> float:
         except (ValueError, TypeError):
             pass
 
+    # 3. 检查提供商特定温度
     provider_temperature_env = {
         "gemini": "GEMINI_TEMPERATURE",
         "vertex_ai": "GEMINI_TEMPERATURE",
@@ -218,6 +233,7 @@ def resolve_unified_llm_temperature(model: str) -> float:
             except (ValueError, TypeError):
                 pass
 
+    # 4. 检查传统独立环境变量（向后兼容）
     for env_name in ("GEMINI_TEMPERATURE", "ANTHROPIC_TEMPERATURE", "OPENAI_TEMPERATURE"):
         env_value = os.getenv(env_name)
         if env_value and env_value.strip():
@@ -226,6 +242,7 @@ def resolve_unified_llm_temperature(model: str) -> float:
             except (ValueError, TypeError):
                 continue
 
+    # 5. 默认值
     return 0.7
 
 

@@ -803,53 +803,64 @@ class GeminiAnalyzer:
 
         last_error = None
         for model in models_to_try:
-            try:
-                model_short = model.split("/")[-1] if "/" in model else model
-                call_kwargs: Dict[str, Any] = {
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": self.SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-                extra = get_thinking_extra_body(model_short)
-                if extra:
-                    call_kwargs["extra_body"] = extra
+            # 对每个模型尝试 2 次：第一次用配置的 temperature，如果失败（如 invalid temperature），第二次自动调整
+            for attempt in range(2):
+                try:
+                    model_short = model.split("/")[-1] if "/" in model else model
+                    # 第一次用配置的 temperature，第二次如果是 temperature 错误则调整
+                    current_temp = temperature if attempt == 0 else (1.0 if "kimi" in model.lower() else temperature)
+                    if attempt > 0:
+                        logger.info(f"[LiteLLM] 自动调整 {model} temperature={current_temp} 重试...")
 
-                _router_model_names = set(get_configured_llm_models(config.llm_model_list))
-                if use_channel_router and self._router and model in _router_model_names:
-                    # Channel / YAML path: Router manages key + base_url per model
-                    response = self._router.completion(**call_kwargs)
-                elif self._router and model == config.litellm_model and not use_channel_router:
-                    # Legacy path: Router only for primary model multi-key
-                    response = self._router.completion(**call_kwargs)
-                else:
-                    # Legacy/direct-env path: direct call (also handles direct-env
-                    # providers like groq/ or bedrock/ that are not in the Router
-                    # model_list even when channel mode is active)
-                    keys = get_api_keys_for_model(model, config)
-                    if keys:
-                        call_kwargs["api_key"] = keys[0]
-                    call_kwargs.update(extra_litellm_params(model, config))
-                    response = litellm.completion(**call_kwargs)
+                    call_kwargs: Dict[str, Any] = {
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": self.SYSTEM_PROMPT},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": current_temp,
+                        "max_tokens": max_tokens,
+                    }
+                    extra = get_thinking_extra_body(model_short)
+                    if extra:
+                        call_kwargs["extra_body"] = extra
 
-                if response and response.choices and response.choices[0].message.content:
-                    usage: Dict[str, Any] = {}
-                    if response.usage:
-                        usage = {
-                            "prompt_tokens": response.usage.prompt_tokens or 0,
-                            "completion_tokens": response.usage.completion_tokens or 0,
-                            "total_tokens": response.usage.total_tokens or 0,
-                        }
-                    return (response.choices[0].message.content, model, usage)
-                raise ValueError("LLM returned empty response")
+                    _router_model_names = set(get_configured_llm_models(config.llm_model_list))
+                    if use_channel_router and self._router and model in _router_model_names:
+                        # Channel / YAML path: Router manages key + base_url per model
+                        response = self._router.completion(**call_kwargs)
+                    elif self._router and model == config.litellm_model and not use_channel_router:
+                        # Legacy path: Router only for primary model multi-key
+                        response = self._router.completion(**call_kwargs)
+                    else:
+                        # Legacy/direct-env path: direct call (also handles direct-env
+                        # providers like groq/ or bedrock/ that are not in the Router
+                        # model_list even when channel mode is active)
+                        keys = get_api_keys_for_model(model, config)
+                        if keys:
+                            call_kwargs["api_key"] = keys[0]
+                        call_kwargs.update(extra_litellm_params(model, config))
+                        response = litellm.completion(**call_kwargs)
 
-            except Exception as e:
-                logger.warning(f"[LiteLLM] {model} failed: {e}")
-                last_error = e
-                continue
+                    if response and response.choices and response.choices[0].message.content:
+                        usage: Dict[str, Any] = {}
+                        if response.usage:
+                            usage = {
+                                "prompt_tokens": response.usage.prompt_tokens or 0,
+                                "completion_tokens": response.usage.completion_tokens or 0,
+                                "total_tokens": response.usage.total_tokens or 0,
+                            }
+                        return (response.choices[0].message.content, model, usage)
+                    raise ValueError("LLM returned empty response")
+
+                except Exception as e:
+                    # 如果是温度错误且是第一次尝试，自动重试调整温度
+                    if attempt == 0 and isinstance(e, litellm.BadRequestError) and "temperature" in str(e).lower():
+                        logger.warning(f"[LiteLLM] {model} temperature error, auto-retrying with temperature=1.0")
+                        continue  # 第二次尝试，temperature=1.0
+                    logger.warning(f"[LiteLLM] {model} failed: {e}")
+                    last_error = e
+                    break  # 跳出重试循环，尝试下一个模型
 
         raise Exception(f"All LLM models failed (tried {len(models_to_try)} model(s)). Last error: {last_error}")
 
